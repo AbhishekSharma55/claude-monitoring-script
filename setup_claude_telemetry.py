@@ -5,7 +5,8 @@ Cross-platform (Windows / macOS / Linux) setup for Claude Code OpenTelemetry.
 
 Asks for your full name, merges the telemetry env into ~/.claude/settings.json
 (without overwriting existing settings), auto-labels the machine by hostname,
-then optionally restarts Claude Code.
+then helps you apply it -- restarting the terminal CLI if it's running, or
+telling you how to reload the VS Code / Cursor extension if that's what you use.
 
 Run:
   Linux / macOS : python3 setup_claude_telemetry.py
@@ -22,7 +23,7 @@ import sys
 import time
 from pathlib import Path
 
-# ── Config ──────────────────────────────────────────────────────────
+# -- Config -----------------------------------------------------------
 # Collector endpoint. Swap for your Tailscale IP if you lock down the
 # public ports, e.g. http://100.x.y.z:4317
 COLLECTOR = "http://95.216.7.165:4317"
@@ -78,38 +79,65 @@ def main() -> None:
     print(f"    host.name = {hostid}")
     print(f"    endpoint  = {COLLECTOR}")
 
-    # 4. Restart Claude Code (it reads settings.json at startup)
+    # 4. Apply the change. Claude Code reads settings.json at startup, so the
+    #    running session must be restarted. Behavior depends on HOW it's run:
+    #      - terminal CLI  -> we can kill + relaunch it
+    #      - VS Code/Cursor extension -> it isn't a 'claude' process, so we
+    #        can't kill it; the user reloads the editor window instead.
     print()
     try:
         ans = input(
-            "Kill any running Claude sessions and start a fresh one now? [y/N] "
+            "Apply now by restarting Claude Code? [y/N] "
         ).strip()
     except EOFError:
         ans = ""
 
-    if ans.lower() == "y":
+    if ans.lower() != "y":
+        print_manual_guidance()
+        return
+
+    if claude_process_running():
+        # A terminal CLI session is running -- restart it.
         kill_claude()
         time.sleep(1)
         claude = shutil.which("claude")
         if claude:
-            print("Starting a new Claude Code session...")
+            print("Restarting Claude Code CLI...")
             if os.name == "nt":
                 subprocess.run([claude])
             else:
                 os.execvp(claude, [claude])
         else:
-            print("'claude' not found in PATH. Open a new terminal and run "
-                  "'claude' to apply.")
+            print("Stopped the running session. Run 'claude' to start a new one.")
     else:
-        print("Done. Exit your current Claude session and run 'claude' again "
-              "to apply.")
+        # No CLI process found -- almost certainly the editor extension.
+        print_extension_guidance()
+
+
+def claude_process_running() -> bool:
+    """True if a terminal 'claude' CLI process appears to be running."""
+    try:
+        if os.name == "nt":
+            out = subprocess.run(
+                ["tasklist", "/FI", "IMAGENAME eq claude.exe"],
+                capture_output=True, text=True,
+            )
+            return "claude.exe" in out.stdout
+        else:
+            r = subprocess.run(
+                ["pgrep", "-x", "claude"],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            )
+            return r.returncode == 0
+    except FileNotFoundError:
+        # pgrep/tasklist not available -- assume not running, fall back to guidance.
+        return False
 
 
 def kill_claude() -> None:
-    """Best-effort stop of a running 'claude' process, per OS."""
+    """Best-effort stop of a running 'claude' CLI process, per OS."""
     try:
         if os.name == "nt":
-            # Process may be claude.exe; ignore failure if not running.
             subprocess.run(
                 ["taskkill", "/F", "/IM", "claude.exe"],
                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
@@ -120,7 +148,30 @@ def kill_claude() -> None:
                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
             )
     except FileNotFoundError:
-        pass  # pkill/taskkill not present — just skip the auto-kill
+        pass
+
+
+def print_extension_guidance() -> None:
+    print(
+        "\nNo terminal 'claude' session was found -- you're likely using the\n"
+        "VS Code / Cursor extension. To apply the new settings:\n"
+        "  1. Open the Command Palette (Ctrl/Cmd + Shift + P)\n"
+        "  2. Run: Developer: Reload Window\n"
+        "  (or just close and reopen the editor)\n"
+        "Then start a Claude Code chat and send a message.\n"
+        "\nNote: if your editor is attached to a remote (SSH/WSL/devcontainer),\n"
+        "this script must be run IN that same remote environment, because the\n"
+        "extension reads ~/.claude/settings.json there, not on your laptop."
+    )
+
+
+def print_manual_guidance() -> None:
+    print(
+        "\nDone. To apply the settings:\n"
+        "  - Terminal CLI: exit your session and run 'claude' again.\n"
+        "  - VS Code / Cursor extension: Command Palette -> "
+        "'Developer: Reload Window'."
+    )
 
 
 if __name__ == "__main__":
