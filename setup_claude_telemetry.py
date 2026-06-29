@@ -1,0 +1,127 @@
+#!/usr/bin/env python3
+"""
+setup_claude_telemetry.py
+Cross-platform (Windows / macOS / Linux) setup for Claude Code OpenTelemetry.
+
+Asks for your full name, merges the telemetry env into ~/.claude/settings.json
+(without overwriting existing settings), auto-labels the machine by hostname,
+then optionally restarts Claude Code.
+
+Run:
+  Linux / macOS : python3 setup_claude_telemetry.py
+  Windows       : python  setup_claude_telemetry.py
+"""
+
+import json
+import os
+import re
+import shutil
+import socket
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+# ── Config ──────────────────────────────────────────────────────────
+# Collector endpoint. Swap for your Tailscale IP if you lock down the
+# public ports, e.g. http://100.x.y.z:4317
+COLLECTOR = "http://95.216.7.165:4317"
+
+
+def main() -> None:
+    settings_dir = Path.home() / ".claude"
+    settings_file = settings_dir / "settings.json"
+
+    # 1. Ask for full name
+    try:
+        full_name = input("Enter your full name: ").strip()
+    except EOFError:
+        full_name = ""
+    if not full_name:
+        print("Error: name cannot be empty.", file=sys.stderr)
+        sys.exit(1)
+
+    # 2. Sanitize for OTEL_RESOURCE_ATTRIBUTES (no spaces / special chars)
+    #    "Alice Brown" -> "alice_brown"; hostname -> safe token.
+    owner = re.sub(r"[^a-z0-9]+", "_", full_name.lower()).strip("_")
+    hostid = re.sub(r"[^a-zA-Z0-9]+", "_", socket.gethostname())
+
+    # 3. Merge env into settings.json (preserve anything already there)
+    settings_dir.mkdir(parents=True, exist_ok=True)
+    data: dict = {}
+    if settings_file.exists():
+        try:
+            loaded = json.loads(settings_file.read_text(encoding="utf-8"))
+            if isinstance(loaded, dict):
+                data = loaded
+        except (json.JSONDecodeError, OSError):
+            data = {}
+
+    env = data.get("env", {})
+    if not isinstance(env, dict):
+        env = {}
+    env.update({
+        "CLAUDE_CODE_ENABLE_TELEMETRY": "1",
+        "OTEL_METRICS_EXPORTER": "otlp",
+        "OTEL_LOGS_EXPORTER": "otlp",
+        "OTEL_EXPORTER_OTLP_PROTOCOL": "grpc",
+        "OTEL_EXPORTER_OTLP_ENDPOINT": COLLECTOR,
+        "OTEL_RESOURCE_ATTRIBUTES": f"host.name={hostid},owner={owner}",
+    })
+    data["env"] = env
+
+    settings_file.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+
+    print()
+    print(f"OK  Telemetry configured in {settings_file}")
+    print(f"    owner     = {owner}")
+    print(f"    host.name = {hostid}")
+    print(f"    endpoint  = {COLLECTOR}")
+
+    # 4. Restart Claude Code (it reads settings.json at startup)
+    print()
+    try:
+        ans = input(
+            "Kill any running Claude sessions and start a fresh one now? [y/N] "
+        ).strip()
+    except EOFError:
+        ans = ""
+
+    if ans.lower() == "y":
+        kill_claude()
+        time.sleep(1)
+        claude = shutil.which("claude")
+        if claude:
+            print("Starting a new Claude Code session...")
+            if os.name == "nt":
+                subprocess.run([claude])
+            else:
+                os.execvp(claude, [claude])
+        else:
+            print("'claude' not found in PATH. Open a new terminal and run "
+                  "'claude' to apply.")
+    else:
+        print("Done. Exit your current Claude session and run 'claude' again "
+              "to apply.")
+
+
+def kill_claude() -> None:
+    """Best-effort stop of a running 'claude' process, per OS."""
+    try:
+        if os.name == "nt":
+            # Process may be claude.exe; ignore failure if not running.
+            subprocess.run(
+                ["taskkill", "/F", "/IM", "claude.exe"],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            )
+        else:
+            subprocess.run(
+                ["pkill", "-x", "claude"],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            )
+    except FileNotFoundError:
+        pass  # pkill/taskkill not present — just skip the auto-kill
+
+
+if __name__ == "__main__":
+    main()
